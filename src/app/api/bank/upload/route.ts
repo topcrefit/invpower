@@ -3,7 +3,7 @@ import { db } from "@/lib/db/client";
 import { bankUploads, bankTransactions } from "@/lib/db/schema";
 import { parseBankExcel, fileSha256 } from "@/lib/parsers/bank-excel";
 import { getSession } from "@/lib/auth/session";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
@@ -64,11 +64,12 @@ export async function POST(req: Request) {
     })
     .returning();
 
-  let inserted = 0;
-  let skipped = 0;
-  for (const r of rows) {
-    try {
-      await db.insert(bankTransactions).values({
+  // Upsert לפי dedupKey: אם תנועה זהה כבר קיימת (למשל אותה אסמכתא בלי prefix "699"),
+  // נדרוס את המקור עם הערכים החדשים — שומר את אותו ID כך שאישורים והתאמות שורדים.
+  const result = await db
+    .insert(bankTransactions)
+    .values(
+      rows.map((r) => ({
         uploadId: upload.id,
         txDate: r.txDate,
         valueDate: r.valueDate,
@@ -80,12 +81,24 @@ export async function POST(req: Request) {
         extractedName: r.extractedName,
         extractedAccount: r.extractedAccount,
         dedupKey: r.dedupKey,
-      });
-      inserted++;
-    } catch {
-      skipped++; // dedup
-    }
-  }
+      }))
+    )
+    .onConflictDoUpdate({
+      target: bankTransactions.dedupKey,
+      set: {
+        reference: sql`excluded.reference`,
+        description: sql`excluded.description`,
+        extendedDescription: sql`excluded.extended_description`,
+        extractedName: sql`excluded.extracted_name`,
+        extractedAccount: sql`excluded.extracted_account`,
+        valueDate: sql`excluded.value_date`,
+        note: sql`excluded.note`,
+      },
+    })
+    .returning({ id: bankTransactions.id });
+
+  const inserted = result.length;
+  const skipped = rows.length - inserted;
 
   return NextResponse.json({
     ok: true,

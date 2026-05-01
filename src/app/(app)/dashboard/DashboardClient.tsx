@@ -1,51 +1,71 @@
 "use client";
 
-import { Fragment, useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Upload,
   RefreshCcw,
   FileSpreadsheet,
   CheckCircle2,
   AlertTriangle,
-  Receipt,
   Loader2,
   ChevronDown,
   ChevronLeft,
-  ExternalLink,
+  HelpCircle,
+  Check,
+  X,
 } from "lucide-react";
 import { formatDateIL, formatILS } from "@/lib/utils";
 
-type Suggestion = {
-  purchaseId: number;
-  accountProductId: string;
-  accountId: string | null;
+type Match = {
+  invoiceNumber: string;
+  invoiceDate: string;
   customerName: string | null;
-  productName: string | null;
-  price: number | null;
-  customerTaxId: string | null;
-  similarity: number;
+  customerId: string | null;
+  totalIncludeVat: number | null;
+  nameSimilarity: number;
+  daysDiff: number;
+  confidence: "high" | "medium";
+  reason: string;
+  approved?: boolean;
+  note?: string | null;
+};
+
+type Candidate = {
+  invoiceNumber: string;
+  invoiceDate: string;
+  customerName: string | null;
+  customerId: string | null;
+  totalIncludeVat: number | null;
+  nameSimilarity: number;
+  daysDiff: number;
   reason: string;
 };
 
-type Tx = {
+type Row = {
   id: number;
   txDate: string;
   amount: number;
-  reference: string | null;
-  description: string | null;
   extractedName: string | null;
   extractedAccount: string | null;
-  extendedDescription: string | null;
-  ourIssued: {
-    id: number;
-    status: string;
-    invoiceNumber: string | null;
-    invoiceLink: string | null;
-    uploadStatus: string;
-  } | null;
-  cardcomExisting: { invoiceNumber: string; reason: string } | null;
-  suggestions: Suggestion[];
+  reference: string | null;
+  description: string | null;
+  match: Match | null;
+  noInvoiceApproval: { reason: string; approvedAt: string } | null;
+  candidates: Candidate[];
 };
+
+type Summary = {
+  total: number;
+  high: number;
+  medium: number;
+  noInvoice: number;
+  unmatched: number;
+  totalAmount: number;
+  matchedAmount: number;
+  unmatchedAmount: number;
+};
+
+type FilterKey = "all" | "high" | "medium" | "noInvoice" | "unmatched";
 
 export default function DashboardClient({
   defaultFrom,
@@ -56,45 +76,47 @@ export default function DashboardClient({
 }) {
   const [from, setFrom] = useState(defaultFrom);
   const [to, setTo] = useState(defaultTo);
-  const [transactions, setTransactions] = useState<Tx[]>([]);
-  // selection: bankTxId → fireberryPurchaseId
-  const [selected, setSelected] = useState<Map<number, number>>(new Map());
+  const [windowDays, setWindowDays] = useState(60);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
   const [working, setWorking] = useState(false);
-  const [uploadInfo, setUploadInfo] = useState<string | null>(null);
-  const [resultMessage, setResultMessage] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<FilterKey>("all");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [approving, setApproving] = useState<number | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [noteDraft, setNoteDraft] = useState<Record<number, string>>({});
+  const [bulkSelected, setBulkSelected] = useState<Set<number>>(new Set());
+  const [noInvDraft, setNoInvDraft] = useState<Record<number, string>>({});
 
-  const loadList = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setSelected(new Map());
     try {
-      const res = await fetch(`/api/invoices/check?from=${from}&to=${to}`);
+      const res = await fetch(
+        `/api/reconcile/bank-vs-cardcom?from=${from}&to=${to}&window=${windowDays}`
+      );
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || "שגיאה בטעינה");
-      setTransactions(j.transactions);
-
-      // אוטומטית: בוחר את ההצעה הכי טובה אם יש בדיוק אחת
-      const auto = new Map<number, number>();
-      for (const t of j.transactions as Tx[]) {
-        if (t.ourIssued || t.cardcomExisting) continue;
-        if (t.suggestions.length === 1) {
-          auto.set(t.id, t.suggestions[0].purchaseId);
-        }
-      }
-      setSelected(auto);
+      setRows(j.rows);
+      setSummary(j.summary);
     } catch (e) {
       setError(e instanceof Error ? e.message : "שגיאה");
     } finally {
       setLoading(false);
     }
-  }, [from, to]);
+  }, [from, to, windowDays]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   async function syncCardcom() {
     setWorking(true);
     setError(null);
+    setInfo(null);
     try {
       const res = await fetch("/api/invoices/sync", {
         method: "POST",
@@ -103,8 +125,8 @@ export default function DashboardClient({
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error);
-      setResultMessage(`Cardcom סונכרן: ${j.created} חדשות, ${j.updated} עודכנו`);
-      await loadList();
+      setInfo(`Cardcom סונכרן: ${j.created} חדשות, ${j.updated} עודכנו`);
+      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "שגיאה בסנכרון");
     } finally {
@@ -112,30 +134,10 @@ export default function DashboardClient({
     }
   }
 
-  async function syncFireberry() {
+  async function onUploadBank(file: File) {
     setWorking(true);
     setError(null);
-    try {
-      const res = await fetch("/api/fireberry/sync-purchases", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from, to }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error);
-      setResultMessage(`Fireberry סונכרן: ${j.created} חדשות, ${j.updated} עודכנו`);
-      await loadList();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "שגיאה בסנכרון");
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function onUpload(file: File) {
-    setWorking(true);
-    setError(null);
-    setUploadInfo(null);
+    setInfo(null);
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -143,15 +145,15 @@ export default function DashboardClient({
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || "שגיאת העלאה");
       if (j.duplicate) {
-        setUploadInfo("הקובץ הזה כבר הועלה בעבר");
+        setInfo("הקובץ הזה כבר הועלה בעבר");
       } else {
-        setUploadInfo(
+        setInfo(
           `הועלו ${j.inserted} שורות (${j.skipped} כפילויות). טווח: ${formatDateIL(j.dateFrom)} – ${formatDateIL(j.dateTo)}`
         );
         setFrom(j.dateFrom.slice(0, 10));
         setTo(j.dateTo.slice(0, 10));
       }
-      await loadList();
+      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "שגיאת העלאה");
     } finally {
@@ -159,11 +161,25 @@ export default function DashboardClient({
     }
   }
 
-  function selectSuggestion(txId: number, purchaseId: number | null) {
-    const n = new Map(selected);
-    if (purchaseId === null) n.delete(txId);
-    else n.set(txId, purchaseId);
-    setSelected(n);
+  async function onImportCardcomExcel(file: File) {
+    setWorking(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/cardcom/import-excel", { method: "POST", body: fd });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאה בייבוא");
+      setInfo(
+        `יובאו ${j.parsed} חשבוניות מ-Cardcom. טווח: ${formatDateIL(j.dateFrom)} – ${formatDateIL(j.dateTo)}`
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה בייבוא");
+    } finally {
+      setWorking(false);
+    }
   }
 
   function toggleExpand(id: number) {
@@ -172,55 +188,223 @@ export default function DashboardClient({
     setExpanded(n);
   }
 
-  async function issueSelected() {
-    if (selected.size === 0) return;
-    if (!confirm(`להפיק ${selected.size} חשבוניות מס-קבלה?`)) return;
-    setWorking(true);
+  async function approveMatch(bankTransactionId: number, cardcomInvoiceNumber: string) {
+    setApproving(bankTransactionId);
     setError(null);
-    setResultMessage(null);
     try {
-      const pairs = Array.from(selected.entries()).map(([bankTxId, purchaseId]) => ({
-        bankTransactionId: bankTxId,
-        fireberryPurchaseId: purchaseId,
-      }));
-      const res = await fetch("/api/invoices/create", {
+      const note = noteDraft[bankTransactionId]?.trim() || null;
+      const res = await fetch("/api/reconcile/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairs }),
+        body: JSON.stringify({ bankTransactionId, cardcomInvoiceNumber, note }),
       });
       const j = await res.json();
-      if (!res.ok) throw new Error(j.error || "שגיאה");
-      const ok = j.results.filter((r: { status: string }) => r.status === "issued").length;
-      const partial = j.results.filter((r: { status: string }) => r.status === "partial").length;
-      const skipped = j.results.filter((r: { status: string }) => r.status === "skipped").length;
-      const failed = j.results.filter((r: { status: string }) => r.status === "failed").length;
-      setResultMessage(
-        `✅ הופקו: ${ok} | ⚠️ חלקיות: ${partial} | ⏭ דולגו: ${skipped} | ❌ נכשלו: ${failed}`
-      );
-      await loadList();
+      if (!res.ok) throw new Error(j.error || "שגיאה באישור");
+      setNoteDraft((d) => {
+        const n = { ...d };
+        delete n[bankTransactionId];
+        return n;
+      });
+      await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "שגיאה בהפקה");
+      setError(e instanceof Error ? e.message : "שגיאה באישור");
     } finally {
-      setWorking(false);
+      setApproving(null);
     }
   }
 
-  const stats = useMemo(() => {
-    const total = transactions.length;
-    const issued = transactions.filter((t) => t.ourIssued?.status === "issued").length;
-    const partial = transactions.filter((t) => t.ourIssued?.status === "partial").length;
-    const inCardcom = transactions.filter(
-      (t) => !t.ourIssued && t.cardcomExisting
-    ).length;
-    const matched = transactions.filter(
-      (t) => !t.ourIssued && !t.cardcomExisting && t.suggestions.length > 0
-    ).length;
-    const noMatch = transactions.filter(
-      (t) => !t.ourIssued && !t.cardcomExisting && t.suggestions.length === 0
-    ).length;
-    const totalAmount = transactions.reduce((s, t) => s + t.amount, 0);
-    return { total, issued, partial, inCardcom, matched, noMatch, totalAmount };
-  }, [transactions]);
+  async function bulkApproveTopCandidates() {
+    const SIM_THRESHOLD = 0.8;
+    const allUnmatched = rows.filter((r) => !r.match && r.candidates.length > 0);
+    // בטיחות: רק שורות שהמועמד המוביל שלהן עם דמיון שם גבוה (≥80%)
+    const targets = allUnmatched.filter(
+      (r) => r.candidates[0].nameSimilarity >= SIM_THRESHOLD
+    );
+    const skipped = allUnmatched.length - targets.length;
+    if (targets.length === 0) {
+      alert(
+        skipped > 0
+          ? `אין שורות לאישור אוטומטי בטוח.\n${skipped} שורות נפסלו כי דמיון השם של המועמד המוביל נמוך מ-80%. אשר אותן ידנית.`
+          : "אין שורות לאישור."
+      );
+      return;
+    }
+    const msg =
+      skipped > 0
+        ? `לאשר את המועמד המוביל של ${targets.length} שורות (דמיון שם ≥80%)?\n\n${skipped} שורות עם דמיון נמוך נפסלו וידרשו אישור ידני.`
+        : `לאשר את המועמד המוביל של ${targets.length} שורות "ללא חשבונית"?\n\nהשורות הללו יסומנו כ"ודאית" עם הערה "אישור מרובה — מועמד מוביל".`;
+    if (!confirm(msg)) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      const items = targets.map((r) => ({
+        bankTransactionId: r.id,
+        cardcomInvoiceNumber: r.candidates[0].invoiceNumber,
+        note: "אישור מרובה — מועמד מוביל",
+      }));
+      const res = await fetch("/api/reconcile/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאה");
+      setInfo(`אושרו ${j.approved} שורות. נותרו רק תנועות ללא מועמד כלל.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkApprove() {
+    if (bulkSelected.size === 0) return;
+    if (!confirm(`לאשר ${bulkSelected.size} שורות?`)) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      const items = rows
+        .filter((r) => bulkSelected.has(r.id) && r.match && !r.match.approved)
+        .map((r) => ({
+          bankTransactionId: r.id,
+          cardcomInvoiceNumber: r.match!.invoiceNumber,
+          note: noteDraft[r.id]?.trim() || null,
+        }));
+      const res = await fetch("/api/reconcile/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאה");
+      setBulkSelected(new Set());
+      setNoteDraft({});
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה באישור");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  function toggleBulk(id: number) {
+    setBulkSelected((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  }
+
+  async function approveNoInvoice(bankTransactionId: number) {
+    const reason = (noInvDraft[bankTransactionId] ?? "").trim();
+    if (!reason) {
+      alert("חובה לרשום סיבה (החזר ממ״ה / ביטוח לאומי / לא מכירה...)");
+      return;
+    }
+    setApproving(bankTransactionId);
+    setError(null);
+    try {
+      const res = await fetch("/api/reconcile/no-invoice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bankTransactionId, reason }),
+      });
+      const j = await res.json();
+      if (!res.ok) {
+        if (res.status === 403) throw new Error("רק אדמין יכול לאשר ללא חשבונית");
+        throw new Error(j.error || "שגיאה");
+      }
+      setNoInvDraft((d) => {
+        const n = { ...d };
+        delete n[bankTransactionId];
+        return n;
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה");
+    } finally {
+      setApproving(null);
+    }
+  }
+
+  async function unapproveNoInvoice(bankTransactionId: number) {
+    if (!confirm("לבטל את אישור האדמין?")) return;
+    setApproving(bankTransactionId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/reconcile/no-invoice?bankTransactionId=${bankTransactionId}`,
+        { method: "DELETE" }
+      );
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאה");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה");
+    } finally {
+      setApproving(null);
+    }
+  }
+
+  async function unapproveMatch(bankTransactionId: number) {
+    if (!confirm("לבטל את האישור?")) return;
+    setApproving(bankTransactionId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/reconcile/approve?bankTransactionId=${bankTransactionId}`, {
+        method: "DELETE",
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאה");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאה");
+    } finally {
+      setApproving(null);
+    }
+  }
+
+  const bulkableIds = useMemo(
+    () => rows.filter((r) => r.match?.confidence === "medium" && !r.match.approved).map((r) => r.id),
+    [rows]
+  );
+
+  const filteredRows = useMemo(() => {
+    switch (filter) {
+      case "high":
+        return rows.filter((r) => r.match?.confidence === "high");
+      case "medium":
+        return rows.filter((r) => r.match?.confidence === "medium");
+      case "noInvoice":
+        return rows.filter((r) => !r.match && r.noInvoiceApproval);
+      case "unmatched":
+        return rows.filter((r) => !r.match && !r.noInvoiceApproval);
+      default:
+        return rows;
+    }
+  }, [rows, filter]);
+
+  const visibleBulkable = useMemo(
+    () => filteredRows.filter((r) => r.match?.confidence === "medium" && !r.match.approved),
+    [filteredRows]
+  );
+  const unmatchedWithCandidates = useMemo(
+    () =>
+      rows.filter((r) => !r.match && !r.noInvoiceApproval && r.candidates.length > 0)
+        .length,
+    [rows]
+  );
+  const allVisibleSelected =
+    visibleBulkable.length > 0 && visibleBulkable.every((r) => bulkSelected.has(r.id));
+
+  function toggleSelectAll() {
+    if (allVisibleSelected) {
+      setBulkSelected(new Set());
+    } else {
+      setBulkSelected(new Set(visibleBulkable.map((r) => r.id)));
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -246,13 +430,21 @@ export default function DashboardClient({
               dir="ltr"
             />
           </div>
-          <button onClick={loadList} className="btn-primary" disabled={loading || working}>
+          <div>
+            <label className="block text-xs text-muted-foreground mb-1">חלון ± ימים</label>
+            <input
+              type="number"
+              min={1}
+              max={120}
+              value={windowDays}
+              onChange={(e) => setWindowDays(Number(e.target.value) || 60)}
+              className="input w-20"
+              dir="ltr"
+            />
+          </div>
+          <button onClick={load} className="btn-primary" disabled={loading || working}>
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
             רענן
-          </button>
-          <button onClick={syncFireberry} className="btn-secondary" disabled={working}>
-            <RefreshCcw className="w-4 h-4" />
-            סנכרן Fireberry
           </button>
           <button onClick={syncCardcom} className="btn-secondary" disabled={working}>
             <RefreshCcw className="w-4 h-4" />
@@ -260,14 +452,29 @@ export default function DashboardClient({
           </button>
           <label className="btn-outline cursor-pointer">
             <Upload className="w-4 h-4" />
-            העלה Excel
+            העלה Excel בנק
             <input
               type="file"
               accept=".xlsx,.xlsm,.xls"
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) onUpload(f);
+                if (f) onUploadBank(f);
+                e.target.value = "";
+              }}
+              disabled={working}
+            />
+          </label>
+          <label className="btn-outline cursor-pointer" title="ייבוא מקובץ 'מסמכים' של Cardcom">
+            <FileSpreadsheet className="w-4 h-4" />
+            ייבא Cardcom מאקסל
+            <input
+              type="file"
+              accept=".xlsx,.xlsm,.xls"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onImportCardcomExcel(f);
                 e.target.value = "";
               }}
               disabled={working}
@@ -276,26 +483,16 @@ export default function DashboardClient({
 
           <div className="flex-1" />
 
-          <button
-            onClick={issueSelected}
-            className="btn-primary"
-            disabled={selected.size === 0 || working}
-          >
-            {working ? <Loader2 className="w-4 h-4 animate-spin" /> : <Receipt className="w-4 h-4" />}
-            הפק {selected.size > 0 ? `(${selected.size})` : ""} חשבוניות
-          </button>
+          <a href="/fireberry-matches" className="btn-outline">
+            שלב ב׳: בנק ↔ Fireberry →
+          </a>
         </div>
 
-        {(uploadInfo || resultMessage || error) && (
+        {(info || error) && (
           <div className="mt-3 space-y-1.5 text-sm">
-            {uploadInfo && (
+            {info && (
               <div className="flex items-center gap-2 text-blue-700 bg-blue-50 px-3 py-2 rounded-md">
-                <FileSpreadsheet className="w-4 h-4" /> {uploadInfo}
-              </div>
-            )}
-            {resultMessage && (
-              <div className="flex items-center gap-2 text-emerald-700 bg-emerald-50 px-3 py-2 rounded-md">
-                <CheckCircle2 className="w-4 h-4" /> {resultMessage}
+                <FileSpreadsheet className="w-4 h-4" /> {info}
               </div>
             )}
             {error && (
@@ -307,51 +504,162 @@ export default function DashboardClient({
         )}
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-        <Stat label="סה״כ תנועות" value={String(stats.total)} />
-        <Stat label="הופקו" value={String(stats.issued)} tone="green" />
-        <Stat label="חלקיות" value={String(stats.partial)} tone="amber" />
-        <Stat label="קיים ב-Cardcom" value={String(stats.inCardcom)} tone="blue" />
-        <Stat label="מומלץ להפיק" value={String(stats.matched)} tone="amber" />
-        <Stat label="ללא match" value={String(stats.noMatch)} />
+      <div className="card p-3">
+        <div className="text-sm font-semibold mb-1">שלב א׳ — בנק ↔ Cardcom</div>
+        <div className="text-xs text-muted-foreground">
+          לכל תנועת בנק נכנסת מאתרים את החשבונית ב-Cardcom שהופקה עבור הכסף הזה.
+          ⚠ ללא חשבונית = קיבלת כסף בלי שהופקה חשבונית.
+        </div>
       </div>
 
+      {summary && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <FilterCard
+            label="סה״כ תנועות"
+            value={String(summary.total)}
+            sub={formatILS(summary.totalAmount)}
+            active={filter === "all"}
+            onClick={() => setFilter("all")}
+          />
+          <FilterCard
+            label="התאמה ודאית"
+            value={String(summary.high)}
+            tone="green"
+            active={filter === "high"}
+            onClick={() => setFilter(filter === "high" ? "all" : "high")}
+          />
+          <FilterCard
+            label="חלקית — דורש בדיקה"
+            value={String(summary.medium)}
+            tone="amber"
+            active={filter === "medium"}
+            onClick={() => setFilter(filter === "medium" ? "all" : "medium")}
+          />
+          <FilterCard
+            label="אישור אדמין (ללא חשבונית)"
+            value={String(summary.noInvoice)}
+            tone="blue"
+            active={filter === "noInvoice"}
+            onClick={() => setFilter(filter === "noInvoice" ? "all" : "noInvoice")}
+          />
+          <FilterCard
+            label="ללא חשבונית"
+            value={String(summary.unmatched)}
+            sub={`חוסר: ${formatILS(summary.unmatchedAmount)}`}
+            tone="red"
+            active={filter === "unmatched"}
+            onClick={() => setFilter(filter === "unmatched" ? "all" : "unmatched")}
+          />
+        </div>
+      )}
+
+      {unmatchedWithCandidates > 0 && filter === "unmatched" && (
+        <div className="card p-2 flex items-center gap-3 bg-red-50 border-red-200">
+          <span className="text-sm">
+            <b>{unmatchedWithCandidates}</b> שורות "ללא חשבונית" יש להן מועמד אפשרי
+          </span>
+          <button
+            onClick={bulkApproveTopCandidates}
+            disabled={bulkBusy}
+            className="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+            title="אישור חד-פעמי של המועמד המוביל בכל אחת"
+          >
+            {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            אשר את כולן (מועמד מוביל)
+          </button>
+          <div className="flex-1" />
+          <span className="text-xs text-muted-foreground">
+            פעולה חד-פעמית. אחרי זה יישארו רק תנועות ללא מועמד כלל.
+          </span>
+        </div>
+      )}
+
+      {bulkableIds.length > 0 && (
+        <div className="card p-2 flex items-center gap-3 bg-amber-50 border-amber-200">
+          <span className="text-sm">
+            נבחרו <b>{bulkSelected.size}</b> מתוך {bulkableIds.length} חלקיות
+          </span>
+          <button
+            onClick={bulkApprove}
+            disabled={bulkSelected.size === 0 || bulkBusy}
+            className="inline-flex items-center gap-1 text-sm px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            אשר נבחרים
+          </button>
+          {bulkSelected.size > 0 && (
+            <button
+              onClick={() => setBulkSelected(new Set())}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              נקה בחירה
+            </button>
+          )}
+          <div className="flex-1" />
+          <span className="text-xs text-muted-foreground">
+            טיפ: סמנו checkbox בטבלה. הערה אופציונלית — הקלידו לפני האישור.
+          </span>
+        </div>
+      )}
+
       <div className="card overflow-hidden">
-        <div className="overflow-auto max-h-[calc(100vh-340px)]">
+        <div className="overflow-auto max-h-[calc(100vh-380px)]">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-slate-100 z-10">
               <tr className="text-right">
+                <th className="px-2 py-2 w-8">
+                  {visibleBulkable.length > 0 && (
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectAll}
+                      title="בחר/בטל הכל"
+                    />
+                  )}
+                </th>
                 <th className="px-2 py-2 w-8"></th>
-                <th className="px-2 py-2">תאריך</th>
+                <th className="px-2 py-2">סטטוס</th>
+                <th className="px-2 py-2">תאריך בנק</th>
                 <th className="px-2 py-2">סכום</th>
                 <th className="px-2 py-2">שם בנק</th>
                 <th className="px-2 py-2">אסמכתא</th>
-                <th className="px-2 py-2">התאמה ב-Fireberry</th>
-                <th className="px-2 py-2">סטטוס</th>
+                <th className="px-2 py-2 border-r-2 border-slate-300">→ חשבונית</th>
+                <th className="px-2 py-2">לקוח Cardcom</th>
+                <th className="px-2 py-2">פער ימים</th>
+                <th className="px-2 py-2">סיבה</th>
+                <th className="px-2 py-2">פעולה</th>
               </tr>
             </thead>
             <tbody>
-              {transactions.length === 0 && !loading && (
+              {filteredRows.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-muted-foreground">
-                    אין תנועות. העלה Excel והרץ "סנכרן Fireberry".
+                  <td colSpan={12} className="text-center py-8 text-muted-foreground">
+                    אין שורות להצגה
                   </td>
                 </tr>
               )}
-              {transactions.map((t) => {
-                const disabled = !!t.ourIssued || !!t.cardcomExisting;
-                const isExpanded = expanded.has(t.id);
-                const selectedPid = selected.get(t.id) ?? null;
-
+              {filteredRows.map((r) => {
+                const isExpanded = expanded.has(r.id);
+                const hasCandidates = !r.match && r.candidates.length > 0;
                 return (
-                  <Fragment key={t.id}>
-                    <tr className={`border-t hover:bg-slate-50 ${disabled ? "opacity-60" : ""}`}>
+                  <Fragment key={r.id}>
+                    <tr className={`border-t hover:bg-slate-50 ${bulkSelected.has(r.id) ? "bg-amber-50" : ""}`}>
                       <td className="px-2 py-1.5 align-top">
-                        {t.suggestions.length > 0 && !disabled && (
+                        {r.match?.confidence === "medium" && !r.match.approved && (
+                          <input
+                            type="checkbox"
+                            checked={bulkSelected.has(r.id)}
+                            onChange={() => toggleBulk(r.id)}
+                            title="סמן לאישור מרובה"
+                          />
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 align-top">
+                        {hasCandidates && (
                           <button
-                            onClick={() => toggleExpand(t.id)}
+                            onClick={() => toggleExpand(r.id)}
                             className="hover:bg-slate-200 rounded p-0.5"
-                            title="הצג הצעות"
+                            title="הצג מועמדים"
                           >
                             {isExpanded ? (
                               <ChevronDown className="w-4 h-4" />
@@ -361,75 +669,168 @@ export default function DashboardClient({
                           </button>
                         )}
                       </td>
-                      <td className="px-2 py-1.5 whitespace-nowrap align-top">
-                        {formatDateIL(t.txDate)}
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap">
+                        <ConfidenceBadge row={r} />
                       </td>
-                      <td className="px-2 py-1.5 whitespace-nowrap font-medium align-top">
-                        {formatILS(t.amount)}
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap">
+                        {formatDateIL(r.txDate)}
                       </td>
-                      <td className="px-2 py-1.5 align-top">
-                        <div>{t.extractedName ?? "—"}</div>
-                        <div className="text-xs text-muted-foreground" dir="ltr">
-                          {t.extractedAccount ?? ""}
-                        </div>
-                      </td>
-                      <td className="px-2 py-1.5 whitespace-nowrap text-xs align-top" dir="ltr">
-                        {t.reference ?? ""}
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap font-medium">
+                        {formatILS(r.amount)}
                       </td>
                       <td className="px-2 py-1.5 align-top">
-                        {disabled ? (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        ) : t.suggestions.length === 0 ? (
-                          <span className="text-xs text-muted-foreground">לא נמצאה</span>
+                        <div>{r.extractedName ?? "—"}</div>
+                        {r.extractedAccount && (
+                          <div className="text-xs text-muted-foreground" dir="ltr">
+                            {r.extractedAccount}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 align-top text-xs" dir="ltr">
+                        {r.reference ?? ""}
+                      </td>
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap font-medium border-r-2 border-slate-300">
+                        {r.match ? (
+                          `#${r.match.invoiceNumber}`
                         ) : (
-                          <SuggestionPicker
-                            suggestions={t.suggestions}
-                            selected={selectedPid}
-                            onSelect={(pid) => selectSuggestion(t.id, pid)}
-                          />
+                          <span className="text-muted-foreground">—</span>
                         )}
                       </td>
                       <td className="px-2 py-1.5 align-top">
-                        <StatusBadge tx={t} />
+                        {r.match?.customerName ?? "—"}
+                        {r.match?.customerId && (
+                          <div className="text-xs text-muted-foreground">ת.ז. {r.match.customerId}</div>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap text-xs">
+                        {r.match ? `${r.match.daysDiff} ימים` : "—"}
+                      </td>
+                      <td className="px-2 py-1.5 align-top text-xs text-muted-foreground">
+                        {r.match?.reason ??
+                          (r.noInvoiceApproval
+                            ? `אושר אדמין — ${r.noInvoiceApproval.reason}`
+                            : hasCandidates
+                              ? "לא נמצאה התאמה ודאית"
+                              : "אין מועמדים")}
+                      </td>
+                      <td className="px-2 py-1.5 align-top whitespace-nowrap">
+                        {r.noInvoiceApproval ? (
+                          <button
+                            onClick={() => unapproveNoInvoice(r.id)}
+                            disabled={approving === r.id}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-slate-300 hover:bg-slate-100 text-slate-700"
+                            title="ביטול אישור אדמין"
+                          >
+                            {approving === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
+                            בטל אישור
+                          </button>
+                        ) : !r.match ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              placeholder="סיבה (חובה)"
+                              value={noInvDraft[r.id] ?? ""}
+                              onChange={(e) =>
+                                setNoInvDraft((d) => ({ ...d, [r.id]: e.target.value }))
+                              }
+                              className="input text-xs px-2 py-1 w-36"
+                            />
+                            <button
+                              onClick={() => approveNoInvoice(r.id)}
+                              disabled={approving === r.id}
+                              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                              title="אישור אדמין: אין צורך בחשבונית"
+                            >
+                              {approving === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                              אשר ללא חשבונית
+                            </button>
+                          </div>
+                        ) : r.match?.approved ? (
+                          <button
+                            onClick={() => unapproveMatch(r.id)}
+                            disabled={approving === r.id}
+                            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-slate-300 hover:bg-slate-100 text-slate-700"
+                            title="ביטול אישור ידני"
+                          >
+                            {approving === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
+                            בטל אישור
+                          </button>
+                        ) : r.match?.confidence === "medium" ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              placeholder="הערה (אופציונלי)"
+                              value={noteDraft[r.id] ?? ""}
+                              onChange={(e) =>
+                                setNoteDraft((d) => ({ ...d, [r.id]: e.target.value }))
+                              }
+                              className="input text-xs px-2 py-1 w-32"
+                            />
+                            <button
+                              onClick={() => approveMatch(r.id, r.match!.invoiceNumber)}
+                              disabled={approving === r.id}
+                              className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                              title="אשר התאמה"
+                            >
+                              {approving === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                              אשר
+                            </button>
+                          </div>
+                        ) : null}
                       </td>
                     </tr>
-                    {isExpanded && t.suggestions.length > 1 && (
+                    {isExpanded && hasCandidates && (
                       <tr className="bg-slate-50 border-t">
-                        <td colSpan={7} className="px-4 py-2">
+                        <td colSpan={12} className="px-4 py-2">
                           <div className="text-xs text-muted-foreground mb-1">
-                            כל ההתאמות ({t.suggestions.length}):
+                            מועמדים אפשריים ({r.candidates.length}):
                           </div>
                           <div className="space-y-1">
-                            {t.suggestions.map((s) => (
-                              <label
-                                key={s.purchaseId}
-                                className="flex items-center gap-3 text-sm cursor-pointer hover:bg-white p-1 rounded"
+                            {r.candidates.map((c) => (
+                              <div
+                                key={c.invoiceNumber}
+                                className="flex flex-wrap items-center gap-3 text-sm bg-white p-1.5 rounded"
                               >
-                                <input
-                                  type="radio"
-                                  name={`tx-${t.id}`}
-                                  checked={selectedPid === s.purchaseId}
-                                  onChange={() => selectSuggestion(t.id, s.purchaseId)}
-                                />
-                                <span className="font-medium">{s.customerName}</span>
-                                <span className="text-xs text-muted-foreground">
-                                  {s.productName ?? ""}
-                                </span>
+                                <span className="font-medium">#{c.invoiceNumber}</span>
+                                <span>{c.customerName ?? "—"}</span>
+                                {c.customerId && (
+                                  <span className="text-xs text-muted-foreground">ת.ז. {c.customerId}</span>
+                                )}
                                 <span className="text-xs">
-                                  ת.ז. {s.customerTaxId ?? "—"}
+                                  {c.totalIncludeVat != null ? formatILS(c.totalIncludeVat) : "—"}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {formatDateIL(c.invoiceDate)}
                                 </span>
                                 <span className="text-xs text-blue-700">
-                                  {(s.similarity * 100).toFixed(0)}%
+                                  {(c.nameSimilarity * 100).toFixed(0)}%
                                 </span>
-                                <span className="text-xs text-muted-foreground">{s.reason}</span>
-                              </label>
+                                <span className="text-xs text-muted-foreground">{c.reason}</span>
+                                <div className="flex-1" />
+                                <input
+                                  type="text"
+                                  placeholder="הערה"
+                                  value={noteDraft[r.id] ?? ""}
+                                  onChange={(e) =>
+                                    setNoteDraft((d) => ({ ...d, [r.id]: e.target.value }))
+                                  }
+                                  className="input text-xs px-2 py-1 w-28"
+                                />
+                                <button
+                                  onClick={() => approveMatch(r.id, c.invoiceNumber)}
+                                  disabled={approving === r.id}
+                                  className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                  title="אשר את החשבונית הזו"
+                                >
+                                  {approving === r.id ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Check className="w-3 h-3" />
+                                  )}
+                                  זאת החשבונית
+                                </button>
+                              </div>
                             ))}
-                            <button
-                              onClick={() => selectSuggestion(t.id, null)}
-                              className="text-xs text-muted-foreground hover:text-foreground"
-                            >
-                              ביטול בחירה
-                            </button>
                           </div>
                         </td>
                       </tr>
@@ -445,118 +846,74 @@ export default function DashboardClient({
   );
 }
 
-function SuggestionPicker({
-  suggestions,
-  selected,
-  onSelect,
+function ConfidenceBadge({
+  row,
 }: {
-  suggestions: Suggestion[];
-  selected: number | null;
-  onSelect: (pid: number | null) => void;
+  row: Row;
 }) {
-  const top = suggestions[0];
-  const isSelected = selected === top.purchaseId;
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="checkbox"
-        checked={isSelected}
-        onChange={() => onSelect(isSelected ? null : top.purchaseId)}
-      />
-      <div className="text-xs">
-        <div className="font-medium">{top.customerName ?? "—"}</div>
-        <div className="text-muted-foreground">
-          {top.productName ?? ""} · ת.ז. {top.customerTaxId ?? "—"} ·{" "}
-          <span className="text-blue-700">{(top.similarity * 100).toFixed(0)}%</span>
-          {suggestions.length > 1 && <span className="text-amber-700"> · +{suggestions.length - 1} נוספות</span>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "green" | "blue" | "amber";
-}) {
-  const tones = {
-    green: "border-emerald-200 bg-emerald-50",
-    blue: "border-blue-200 bg-blue-50",
-    amber: "border-amber-200 bg-amber-50",
-  } as const;
-  return (
-    <div className={`card p-2 ${tone ? tones[tone] : ""}`}>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-base font-bold">{value}</div>
-    </div>
-  );
-}
-
-function StatusBadge({ tx }: { tx: Tx }) {
-  if (tx.ourIssued) {
-    const s = tx.ourIssued;
-    if (s.status === "issued") {
-      return (
-        <div className="flex items-center gap-1">
-          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
-            <CheckCircle2 className="w-3 h-3" />
-            הופק {s.invoiceNumber}
-          </span>
-          {s.invoiceLink && (
-            <a
-              href={s.invoiceLink}
-              target="_blank"
-              rel="noreferrer"
-              className="text-blue-600 hover:text-blue-800"
-              title="פתח PDF"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-          )}
-        </div>
-      );
-    }
-    if (s.status === "partial") {
-      return (
-        <span
-          className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700"
-          title={`Cardcom OK / Fireberry: ${s.uploadStatus}`}
-        >
-          <AlertTriangle className="w-3 h-3" /> חלקי {s.invoiceNumber}
-        </span>
-      );
-    }
+  if (row.match?.confidence === "high") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-        <AlertTriangle className="w-3 h-3" /> נכשל
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+        <CheckCircle2 className="w-3 h-3" /> ודאית
       </span>
     );
   }
-  if (tx.cardcomExisting) {
+  if (row.match?.confidence === "medium") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+        <AlertTriangle className="w-3 h-3" /> חלקית
+      </span>
+    );
+  }
+  if (row.noInvoiceApproval) {
     return (
       <span
         className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700"
-        title={tx.cardcomExisting.reason}
+        title={row.noInvoiceApproval.reason}
       >
-        קיים ב-Cardcom #{tx.cardcomExisting.invoiceNumber}
-      </span>
-    );
-  }
-  if (tx.suggestions.length === 0) {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
-        ללא match
+        <CheckCircle2 className="w-3 h-3" /> אושר אדמין
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-      ממתין להפקה
+    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+      <HelpCircle className="w-3 h-3" /> ללא
     </span>
+  );
+}
+
+function FilterCard({
+  label,
+  value,
+  sub,
+  tone,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: "green" | "amber" | "red" | "blue";
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  const tones = {
+    green: "border-emerald-200 bg-emerald-50",
+    amber: "border-amber-200 bg-amber-50",
+    red: "border-red-200 bg-red-50",
+    blue: "border-blue-200 bg-blue-50",
+  } as const;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`card p-3 text-right transition cursor-pointer hover:brightness-95 ${
+        tone ? tones[tone] : ""
+      } ${active ? "ring-2 ring-blue-500" : ""}`}
+    >
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-xl font-bold">{value}</div>
+      {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
+    </button>
   );
 }

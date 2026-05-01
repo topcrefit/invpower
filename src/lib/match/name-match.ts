@@ -12,6 +12,8 @@ export function normalizeName(s: string | null | undefined): string {
     .replace(/ן/g, "נ")
     .replace(/ף/g, "פ")
     .replace(/ץ/g, "צ")
+    // ניטרול שינויי איות בעברית — ת↔ט נפוץ בשמות (מועתז/מועטז)
+    .replace(/ת/g, "ט")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
@@ -54,15 +56,15 @@ export function nameSimilarity(a: string, b: string): number {
   // Containment full
   if (na.includes(nb) || nb.includes(na)) return 0.95;
 
-  // Token overlap
+  // Token overlap — אפילו טוקן אחד משותף מקנה דירוג חלקי משמעותי
   const ta = new Set(na.split(" ").filter((t) => t.length > 1));
   const tb = new Set(nb.split(" ").filter((t) => t.length > 1));
   const inter = [...ta].filter((t) => tb.has(t)).length;
   const union = new Set([...ta, ...tb]).size;
   const tokenScore = union === 0 ? 0 : inter / union;
-  if (tokenScore >= 0.5) {
-    // Boost if at least one full token matches AND lengths are close
-    return Math.min(0.9, 0.6 + tokenScore * 0.4);
+  if (tokenScore > 0) {
+    // 1/4 → 0.55, 2/4 → 0.7, 3/4 → 0.85, 4/4 → 1.0
+    return Math.min(1, 0.4 + tokenScore * 0.6);
   }
 
   // Levenshtein-based ratio
@@ -97,7 +99,7 @@ export function scoreMatch(
   if (fbAmount == null) return null;
   if (!amountsEqual(bankAmount, fbAmount)) return null;
   const sim = nameSimilarity(bankName ?? "", fbName ?? "");
-  if (sim < 0.6) return null;
+  if (sim < 0.9) return null;
   return {
     amountMatch: true,
     nameSimilarity: sim,

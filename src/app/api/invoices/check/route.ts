@@ -4,11 +4,11 @@ import {
   bankTransactions,
   fireberryPurchases,
   issuedInvoices,
+  cardcomInvoices,
 } from "@/lib/db/schema";
-import { and, gte, lte, asc, eq } from "drizzle-orm";
+import { and, gte, lte, asc } from "drizzle-orm";
 import { getSession } from "@/lib/auth/session";
-import { findExistingCardcomInvoice } from "@/lib/invoices/check-duplicates";
-import { scoreMatch } from "@/lib/match/name-match";
+import { scoreMatch, nameSimilarity, amountsEqual } from "@/lib/match/name-match";
 
 export const runtime = "nodejs";
 
@@ -25,18 +25,20 @@ export async function GET(req: Request) {
   const from = new Date(fromStr + "T00:00:00");
   const to = new Date(toStr + "T23:59:59");
 
-  // Bank txs בטווח
-  const txRows = await db
-    .select()
-    .from(bankTransactions)
-    .where(and(gte(bankTransactions.txDate, from), lte(bankTransactions.txDate, to)))
-    .orderBy(asc(bankTransactions.txDate));
+  const dayMs = 86400 * 1000;
+  const fromWithBuffer = new Date(from.getTime() - dayMs * 2);
+  const toWithBuffer = new Date(to.getTime() + dayMs * 2);
 
-  // כל הרכישות מ-Fireberry — נסנן בזיכרון לפי סכום ושם
-  const fbRows = await db.select().from(fireberryPurchases);
-
-  // Issued invoices קיימות
-  const ourIssued = await db.select().from(issuedInvoices);
+  // טען הכל במקביל — בקשה אחת לכל טבלה
+  const [txRows, fbRows, ourIssued, cachedCardcom] = await Promise.all([
+    db.select().from(bankTransactions)
+      .where(and(gte(bankTransactions.txDate, from), lte(bankTransactions.txDate, to)))
+      .orderBy(asc(bankTransactions.txDate)),
+    db.select().from(fireberryPurchases),
+    db.select().from(issuedInvoices),
+    db.select().from(cardcomInvoices)
+      .where(and(gte(cardcomInvoices.invoiceDate, fromWithBuffer), lte(cardcomInvoices.invoiceDate, toWithBuffer))),
+  ]);
   const issuedByTx = new Map<number, typeof ourIssued[number]>();
   for (const i of ourIssued) {
     const cur = issuedByTx.get(i.bankTransactionId);
@@ -78,14 +80,25 @@ export async function GET(req: Request) {
     }
     suggestions.sort((a, b) => b.similarity - a.similarity);
 
-    // קיים ב-Cardcom (מטמון)?
+    // קיים ב-Cardcom (מטמון)? — התאמה בזיכרון, ללא DB query
     let cardcomMatch: { invoiceNumber: string; reason: string } | null = null;
     if (!ours) {
-      cardcomMatch = await findExistingCardcomInvoice(
-        tx.amount,
-        tx.extractedName,
-        tx.txDate
-      );
+      const txTime = new Date(tx.txDate).getTime();
+      for (const c of cachedCardcom) {
+        if (c.totalIncludeVat == null) continue;
+        const cTime = new Date(c.invoiceDate).getTime();
+        if (Math.abs(cTime - txTime) > dayMs * 2) continue;
+        if (!amountsEqual(tx.amount, c.totalIncludeVat)) continue;
+        if (!tx.extractedName) {
+          cardcomMatch = { invoiceNumber: c.invoiceNumber, reason: `סכום זהה (${tx.amount}) ותאריך תואם` };
+          break;
+        }
+        const sim = nameSimilarity(tx.extractedName, c.customerName ?? "");
+        if (sim >= 0.9) {
+          cardcomMatch = { invoiceNumber: c.invoiceNumber, reason: `סכום זהה + שם דומה (${(sim * 100).toFixed(0)}%) ל-${c.customerName ?? "?"}` };
+          break;
+        }
+      }
     }
 
     result.push({

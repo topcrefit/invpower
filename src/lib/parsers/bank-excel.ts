@@ -82,6 +82,17 @@ function makeDedupKey(parts: (string | number | null)[]): string {
     .slice(0, 32);
 }
 
+/**
+ * נירמול reference בנקאי — הבנק לפעמים מוסיף "699" כ-prefix לציון סוג העברה,
+ * ולפעמים לא. ההסרה שלו מאפשרת dedup אמין לאותה תנועה כשהיא מופיעה שוב.
+ */
+export function normalizeRef(ref: string | null | undefined): string | null {
+  if (!ref) return null;
+  const trimmed = String(ref).trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/^699/, "") || trimmed;
+}
+
 export function parseBankExcel(buf: Buffer): ParsedBankRow[] {
   const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
   const sheetName = wb.SheetNames[0];
@@ -161,7 +172,7 @@ export function parseBankExcel(buf: Buffer): ParsedBankRow[] {
       extractedAccount: account,
       dedupKey: makeDedupKey([
         txDate.toISOString().slice(0, 10),
-        reference,
+        normalizeRef(reference),
         credit,
         extended,
       ]),

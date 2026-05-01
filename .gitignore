@@ -11,3 +11,15 @@ local.db
 local.db-journal
 .vscode
 .idea
+tsconfig.tsbuildinfo
+
+# Scripts with hardcoded secrets / data files
+scripts/update-cardcom-creds.ts
+scripts/test-old-creds.ts
+scripts/*.csv
+scripts/temp-*.xlsx
+scripts/temp-*.xls
+
+# Secrets
+secrets/
+*.json.key

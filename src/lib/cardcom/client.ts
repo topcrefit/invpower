@@ -46,7 +46,7 @@ export async function cardcomCreateTaxInvoice(
   const body: Record<string, unknown> = {
     ApiName: creds.apiName,
     ApiPassword: creds.apiPassword,
-    InvoiceType: 3,
+    InvoiceType: 3, // חשבונית מס/קבלה
     InvoiceHead: {
       CustName: input.customerName,
       CompID: input.customerTaxId ?? undefined,
@@ -54,26 +54,30 @@ export async function cardcomCreateTaxInvoice(
       AccountForeignKey: input.fireberryAccountId ?? undefined,
       Language: "he",
       CoinID: 1,
+      // ExtIsVatFree לא נשלח — ברירת המחדל ב-Cardcom היא חייב במע״מ
     },
     InvoiceLines: [
       {
         Description: input.productDescription || "תשלום",
-        Price: input.amount,
+        Price: input.amount, // מספר, כולל מע"מ
         Quantity: 1,
+        IsPriceIncludeVAT: true,
       },
     ],
-    CustomPay: [
+    // CustomLines (לא CustomPay!) — חובה בדיוק לפי התיעוד
+    // ⚠ אסור לשלוח Description בעברית — שובר את סיווג התשלום ל"הכנסה לבירור"
+    // Cardcom מסווג אוטומטית "העברה בנקאית" כשהבלוק הזה מולא
+    CustomLines: [
       {
-        Description: PAYMENT_DESCRIPTION_BANK_TRANSFER,
-        Sum: input.amount,
-        Asmachta: input.asmachta ?? "",
-        DateCheque: ymdHyphen(input.bankDate),
+        Sum: input.amount, // מספר, זהה ל-Price
+        asmacta: input.asmachta ?? "", // אותיות קטנות!
+        TranDate: ymdHyphen(input.bankDate), // YYYY-MM-DD בלבד
       },
     ],
   };
   if (creds.terminalNumber) body.TerminalNumber = creds.terminalNumber;
 
-  const url = `${creds.baseUrl}/api/v11/Invoice/CreateTaxInvoice`;
+  const url = `${creds.baseUrl}/api/v11/Documents/CreateTaxInvoice`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -148,6 +152,38 @@ export async function cardcomDownloadPdfFromUrl(invoiceLink: string): Promise<Bu
   }
   const ab = await res.arrayBuffer();
   return Buffer.from(ab);
+}
+
+/**
+ * הורדת PDF של חשבונית לפי מספר חשבונית — דרך GetDocumentPDF.aspx.
+ * זה ה-endpoint שמתעד הקבלן ועובד.
+ */
+export async function cardcomDownloadPdfByNumber(
+  invoiceNumber: string | number,
+  documentType: number = 1
+): Promise<Buffer> {
+  const creds = await getCardcomCreds();
+  if (!creds) throw new Error("Cardcom credentials not configured");
+  const url =
+    `${creds.baseUrl}/interface/GetDocumentPDF.aspx` +
+    `?UserName=${encodeURIComponent(creds.apiName)}` +
+    `&UserPassword=${encodeURIComponent(creds.apiPassword)}` +
+    `&DocumentNumber=${encodeURIComponent(String(invoiceNumber))}` +
+    `&DocumentType=${documentType}` +
+    `&IsOriginal=True`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`PDF download failed: HTTP ${res.status}`);
+  }
+  const ab = await res.arrayBuffer();
+  const buf = Buffer.from(ab);
+  // ולידציה — חייב להתחיל ב-%PDF
+  if (buf.length < 100 || !buf.toString("utf8", 0, 4).startsWith("%PDF")) {
+    throw new Error(
+      `Invalid PDF response from Cardcom (${buf.length} bytes, starts with "${buf.toString("utf8", 0, 20)}")`
+    );
+  }
+  return buf;
 }
 
 function pickStr(o: Record<string, unknown>, ...keys: string[]): string | undefined {

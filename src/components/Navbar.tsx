@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Home, Users, Bell, Settings } from "lucide-react";
+import { LogOut, Home, Users, Bell, Settings, FileSearch } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function Navbar({
@@ -21,6 +21,7 @@ export default function Navbar({
 
   const links = [
     { href: "/dashboard", label: "דאשבורד", icon: Home, show: true },
+    { href: "/bank-audit", label: "ביקורת בנק", icon: FileSearch, show: true },
     { href: "/admin/users", label: "משתמשים", icon: Users, show: user.role === "admin" },
     { href: "/admin/alerts", label: "התראות", icon: Bell, show: user.role === "admin" },
     {

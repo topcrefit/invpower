@@ -98,6 +98,7 @@ export const fireberryPurchases = sqliteTable(
     accountProductId: text("account_product_id").notNull(), // PK ב-Fireberry
     accountId: text("account_id"), // לשימוש ב-AccountForeignKey
     productName: text("product_name"),
+    invoiceLinesDescription: text("invoice_lines_description"), // pcfInvoiceLinesDescription — תיאור לחשבונית
     price: real("price"), // price ?? pcfsystemfield1007
     customerName: text("customer_name"), // accountname
     customerTaxId: text("customer_tax_id"), // idnumber (אחרי enrichment)
@@ -213,6 +214,82 @@ export const issuedInvoices = sqliteTable(
 );
 
 /* ===================================================================
+   BANK ↔ CARDCOM MANUAL MATCHES (אישורים ידניים)
+   =================================================================== */
+export const bankCardcomMatches = sqliteTable(
+  "bank_cardcom_matches",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    bankTransactionId: integer("bank_transaction_id")
+      .notNull()
+      .references(() => bankTransactions.id, { onDelete: "cascade" }),
+    cardcomInvoiceNumber: text("cardcom_invoice_number").notNull(),
+    note: text("note"),
+    approvedByUserId: integer("approved_by_user_id")
+      .notNull()
+      .references(() => users.id),
+    approvedAt: integer("approved_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    bankTxIdx: uniqueIndex("bank_cc_match_bank_tx_idx").on(t.bankTransactionId),
+    invIdx: index("bank_cc_match_inv_idx").on(t.cardcomInvoiceNumber),
+  })
+);
+
+/* ===================================================================
+   BANK ↔ FIREBERRY MANUAL MATCHES (אישורים ידניים — שלב ב׳)
+   =================================================================== */
+export const bankFireberryMatches = sqliteTable(
+  "bank_fireberry_matches",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    bankTransactionId: integer("bank_transaction_id")
+      .notNull()
+      .references(() => bankTransactions.id, { onDelete: "cascade" }),
+    fireberryPurchaseId: integer("fireberry_purchase_id")
+      .notNull()
+      .references(() => fireberryPurchases.id, { onDelete: "cascade" }),
+    note: text("note"),
+    approvedByUserId: integer("approved_by_user_id")
+      .notNull()
+      .references(() => users.id),
+    approvedAt: integer("approved_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    bankTxIdx: uniqueIndex("bank_fb_match_bank_tx_idx").on(t.bankTransactionId),
+    fbIdx: index("bank_fb_match_fb_idx").on(t.fireberryPurchaseId),
+  })
+);
+
+/* ===================================================================
+   BANK NO-INVOICE APPROVALS — אישור אדמין שאין צורך בחשבונית
+   (החזרי מס הכנסה / ביטוח לאומי / כסף שהלקוח החזיר וכו')
+   =================================================================== */
+export const bankNoInvoiceApprovals = sqliteTable(
+  "bank_no_invoice_approvals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    bankTransactionId: integer("bank_transaction_id")
+      .notNull()
+      .references(() => bankTransactions.id, { onDelete: "cascade" }),
+    reason: text("reason").notNull(),
+    approvedByUserId: integer("approved_by_user_id")
+      .notNull()
+      .references(() => users.id),
+    approvedAt: integer("approved_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    bankTxIdx: uniqueIndex("bank_no_inv_appr_bank_tx_idx").on(t.bankTransactionId),
+  })
+);
+
+/* ===================================================================
    ALERTS
    =================================================================== */
 export const alerts = sqliteTable(
@@ -252,3 +329,6 @@ export type IssuedInvoice = typeof issuedInvoices.$inferSelect;
 export type CardcomInvoice = typeof cardcomInvoices.$inferSelect;
 export type Alert = typeof alerts.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
+export type BankCardcomMatch = typeof bankCardcomMatches.$inferSelect;
+export type BankFireberryMatch = typeof bankFireberryMatches.$inferSelect;
+export type BankNoInvoiceApproval = typeof bankNoInvoiceApprovals.$inferSelect;
