@@ -116,77 +116,126 @@ export async function GET(req: Request) {
   const usedCardcom = new Set<number>();
   const result: RowResult[] = [];
 
+  // ===================================================================
+  // STAGE 1 — Fireberry "לא נשלח": שיוך גלובלי לפי ניקוד דמיון+קרבת תאריך
+  // הניקוד: sim*100 + (DAYS_WINDOW - daysDiff)*10
+  // → 1 יום הבדל בתאריך = 60 נק' (שווה ערך לפער דמיון של 0.6)
+  // → 7 יום הבדל = 0 נק' תאריך (סף קשיח)
+  // יוצרים את כל הזוגות האפשריים, ממיינים יורד, ומקצים בלעדי.
+  // ===================================================================
+  const NOTSENT_DAYS_WINDOW = 7;
+  type FbPair = {
+    txId: number;
+    fbId: number;
+    sim: number;
+    daysDiff: number;
+    score: number;
+  };
+  const fbCandidates: FbPair[] = [];
   for (const tx of txRows) {
+    if (issuedByTxId.get(tx.id)) continue;
     const txTime = new Date(tx.txDate).getTime();
     const txName = tx.extractedName ?? "";
+    for (const fb of fbNotSent) {
+      if (fb.price == null) continue;
+      if (!amountsEqual(tx.amount, fb.price)) continue;
+      const fbTime = fb.createdOn ? new Date(fb.createdOn).getTime() : txTime;
+      const daysDiff = Math.abs(fbTime - txTime) / MS_DAY;
+      if (daysDiff > NOTSENT_DAYS_WINDOW) continue;
+      const sim = nameSimilarity(txName, fb.customerName ?? "");
+      if (sim < 0.5) continue;
+      const score = sim * 100 + (NOTSENT_DAYS_WINDOW - daysDiff) * 10;
+      fbCandidates.push({ txId: tx.id, fbId: fb.id, sim, daysDiff, score });
+    }
+  }
+  fbCandidates.sort((a, b) => b.score - a.score);
+  const fbAssignment = new Map<number, FbPair>(); // txId -> pair
+  for (const c of fbCandidates) {
+    if (fbAssignment.has(c.txId)) continue;
+    if (usedFb.has(c.fbId)) continue;
+    fbAssignment.set(c.txId, c);
+    usedFb.add(c.fbId);
+  }
 
-    // האם כבר הופקה חשבונית דרך המערכת שלנו?
+  // ===================================================================
+  // STAGE 2 — Cardcom: שיוך גלובלי דומה (סף 0.5 דמיון, ללא תאריך כי
+  // ב-cardcom יש לנו תאריך הפקה ולא בהכרח תאריך תשלום בנק)
+  // ===================================================================
+  type CcPair = { txId: number; ccId: number; sim: number };
+  const ccCandidates: CcPair[] = [];
+  for (const tx of txRows) {
+    if (issuedByTxId.get(tx.id)) continue;
+    if (fbAssignment.has(tx.id)) continue;
+    const txName = tx.extractedName ?? "";
+    for (const cc of cardcomRows) {
+      if (cc.totalIncludeVat == null) continue;
+      if (!amountsEqual(tx.amount, cc.totalIncludeVat)) continue;
+      const sim = nameSimilarity(txName, cc.customerName ?? "");
+      if (sim < 0.5) continue;
+      ccCandidates.push({ txId: tx.id, ccId: cc.id, sim });
+    }
+  }
+  ccCandidates.sort((a, b) => b.sim - a.sim);
+  const ccAssignment = new Map<number, CcPair>();
+  for (const c of ccCandidates) {
+    if (ccAssignment.has(c.txId)) continue;
+    if (usedCardcom.has(c.ccId)) continue;
+    ccAssignment.set(c.txId, c);
+    usedCardcom.add(c.ccId);
+  }
+
+  // ===================================================================
+  // STAGE 3 — Fireberry "נשלח": שיוך גלובלי לפי ניקוד דמיון+תאריך
+  // ===================================================================
+  const SENT_DAYS_WINDOW = 14;
+  const fbSentCandidates: FbPair[] = [];
+  for (const tx of txRows) {
+    if (issuedByTxId.get(tx.id)) continue;
+    if (fbAssignment.has(tx.id)) continue;
+    if (ccAssignment.has(tx.id)) continue;
+    const txTime = new Date(tx.txDate).getTime();
+    const txName = tx.extractedName ?? "";
+    for (const fb of fbSent) {
+      if (usedFb.has(fb.id)) continue;
+      if (fb.price == null) continue;
+      if (!amountsEqual(tx.amount, fb.price)) continue;
+      const fbTime = fb.createdOn ? new Date(fb.createdOn).getTime() : txTime;
+      const daysDiff = Math.abs(fbTime - txTime) / MS_DAY;
+      if (daysDiff > SENT_DAYS_WINDOW) continue;
+      const sim = nameSimilarity(txName, fb.customerName ?? "");
+      if (sim < 0.5) continue;
+      const score = sim * 100 + (SENT_DAYS_WINDOW - daysDiff) * 5;
+      fbSentCandidates.push({ txId: tx.id, fbId: fb.id, sim, daysDiff, score });
+    }
+  }
+  fbSentCandidates.sort((a, b) => b.score - a.score);
+  const fbSentAssignment = new Map<number, FbPair>();
+  for (const c of fbSentCandidates) {
+    if (fbSentAssignment.has(c.txId)) continue;
+    if (usedFb.has(c.fbId)) continue;
+    fbSentAssignment.set(c.txId, c);
+    usedFb.add(c.fbId);
+  }
+
+  // אינדקסים מהירים לבניית התוצאה
+  const fbById = new Map(fbAll.map((f) => [f.id, f]));
+  const ccById = new Map(cardcomRows.map((c) => [c.id, c]));
+
+  for (const tx of txRows) {
     const issuedRecord = issuedByTxId.get(tx.id);
-    // האם אדמין אישר שאין צורך בחשבונית?
     const adminAppr = approvalByTxId.get(tx.id);
 
-    // 1. Fireberry "לא נשלח" — סף 0.5
-    let bestFb: (typeof fbAll)[number] | null = null;
-    let bestSim = 0;
-    let bestDays = 999;
-    if (!issuedRecord) {
-      for (const fb of fbNotSent) {
-        if (usedFb.has(fb.id)) continue;
-        if (fb.price == null) continue;
-        if (!amountsEqual(tx.amount, fb.price)) continue;
-        const fbTime = fb.createdOn ? new Date(fb.createdOn).getTime() : txTime;
-        const daysDiff = Math.abs(fbTime - txTime) / MS_DAY;
-        if (daysDiff > 60) continue;
-        const sim = nameSimilarity(txName, fb.customerName ?? "");
-        if (sim < 0.5) continue;
-        if (sim > bestSim || (sim === bestSim && daysDiff < bestDays)) {
-          bestSim = sim;
-          bestDays = daysDiff;
-          bestFb = fb;
-        }
-      }
-    }
-    if (bestFb) usedFb.add(bestFb.id);
+    const fbPair = fbAssignment.get(tx.id);
+    const bestFb = fbPair ? fbById.get(fbPair.fbId) ?? null : null;
+    const bestSim = fbPair?.sim ?? 0;
+    const bestDays = fbPair?.daysDiff ?? 999;
 
-    // 2. אם לא נמצא — בודקים ב-Cardcom (סף 0.5)
-    let cardcomBest: (typeof cardcomRows)[number] | null = null;
-    let cardcomBestSim = 0;
-    if (!issuedRecord && !bestFb) {
-      for (const cc of cardcomRows) {
-        if (usedCardcom.has(cc.id)) continue;
-        if (cc.totalIncludeVat == null) continue;
-        if (!amountsEqual(tx.amount, cc.totalIncludeVat)) continue;
-        const sim = nameSimilarity(txName, cc.customerName ?? "");
-        if (sim < 0.5) continue;
-        if (sim > cardcomBestSim) {
-          cardcomBestSim = sim;
-          cardcomBest = cc;
-        }
-      }
-    }
-    if (cardcomBest) usedCardcom.add(cardcomBest.id);
+    const ccPair = ccAssignment.get(tx.id);
+    const cardcomBest = ccPair ? ccById.get(ccPair.ccId) ?? null : null;
+    const cardcomBestSim = ccPair?.sim ?? 0;
 
-    // 3. ולבסוף — Fireberry "נשלח" (כדי לתפוס מקרים שב-Cardcom השם שונה מאוד)
-    let fbSentBest: (typeof fbAll)[number] | null = null;
-    if (!issuedRecord && !bestFb && !cardcomBest) {
-      let bestScore = -1;
-      for (const fb of fbSent) {
-        if (usedFb.has(fb.id)) continue;
-        if (fb.price == null) continue;
-        if (!amountsEqual(tx.amount, fb.price)) continue;
-        const fbTime = fb.createdOn ? new Date(fb.createdOn).getTime() : txTime;
-        const daysDiff = Math.abs(fbTime - txTime) / MS_DAY;
-        if (daysDiff > 21) continue;
-        const sim = nameSimilarity(txName, fb.customerName ?? "");
-        if (sim < 0.5) continue;
-        const score = sim * 100 - daysDiff;
-        if (score > bestScore) {
-          bestScore = score;
-          fbSentBest = fb;
-        }
-      }
-    }
-    if (fbSentBest) usedFb.add(fbSentBest.id);
+    const fbSentPair = fbSentAssignment.get(tx.id);
+    const fbSentBest = fbSentPair ? fbById.get(fbSentPair.fbId) ?? null : null;
 
     let status: RowResult["status"];
     if (adminAppr) status = "admin_approved";
