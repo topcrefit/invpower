@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRef } from "react";
 import {
   RefreshCcw,
   Loader2,
@@ -11,6 +12,7 @@ import {
   ArrowUpDown,
   FileText,
   Download,
+  Upload,
 } from "lucide-react";
 import { formatDateIL, formatILS } from "@/lib/utils";
 
@@ -109,6 +111,8 @@ export default function BankAuditClient() {
     {}
   );
   const [approving, setApproving] = useState<number | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -214,6 +218,35 @@ export default function BankAuditClient() {
       setError(e instanceof Error ? e.message : "שגיאה");
     } finally {
       setApproving(null);
+    }
+  }
+
+  async function onUploadBank(file: File) {
+    setUploading(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/bank/upload", {
+        method: "POST",
+        body: fd,
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "שגיאת העלאה");
+      if (j.duplicate) {
+        setInfo("הקובץ הזה כבר הועלה בעבר");
+      } else {
+        setInfo(
+          `הועלו ${j.inserted} שורות (${j.skipped} כפילויות). טווח: ${j.dateFrom?.slice(0, 10)} – ${j.dateTo?.slice(0, 10)}`
+        );
+      }
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "שגיאת העלאה");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -456,7 +489,7 @@ export default function BankAuditClient() {
         <button
           onClick={syncAll}
           className="btn-primary"
-          disabled={loading || syncingAll}
+          disabled={loading || syncingAll || uploading}
           title="סנכרון מלא — Cardcom + Fireberry"
         >
           {syncingAll ? (
@@ -465,6 +498,29 @@ export default function BankAuditClient() {
             <RefreshCcw className="w-4 h-4" />
           )}
           סנכרן הכל (Cardcom + Fireberry)
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xls,.xlsx,.xlsm"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onUploadBank(f);
+          }}
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="btn-secondary"
+          disabled={uploading || syncingAll}
+          title="העלה קובץ Excel של תנועות בנק"
+        >
+          {uploading ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Upload className="w-4 h-4" />
+          )}
+          העלה קובץ בנק
         </button>
         <button
           onClick={load}
@@ -488,9 +544,6 @@ export default function BankAuditClient() {
           ייצא לאקסל
         </button>
         <div className="flex-1" />
-        <a href="/dashboard" className="text-sm text-blue-600 hover:underline">
-          ← דאשבורד
-        </a>
       </div>
 
       <div className="card p-3">

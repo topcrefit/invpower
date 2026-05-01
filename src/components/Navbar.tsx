@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Home, Users, Bell, Settings, FileSearch } from "lucide-react";
+import { LogOut, Users, Bell, Settings, FileSearch } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function Navbar({
@@ -20,7 +20,6 @@ export default function Navbar({
   }
 
   const links = [
-    { href: "/dashboard", label: "דאשבורד", icon: Home, show: true },
     { href: "/bank-audit", label: "ביקורת בנק", icon: FileSearch, show: true },
     { href: "/admin/users", label: "משתמשים", icon: Users, show: user.role === "admin" },
     { href: "/admin/alerts", label: "התראות", icon: Bell, show: user.role === "admin" },
@@ -36,7 +35,7 @@ export default function Navbar({
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b">
       <div className="container mx-auto px-4 h-14 flex items-center justify-between gap-4">
         <div className="flex items-center gap-6">
-          <Link href="/dashboard" className="font-bold text-lg">InvPower</Link>
+          <Link href="/bank-audit" className="font-bold text-lg">InvPower</Link>
           <nav className="flex items-center gap-1">
             {links
               .filter((l) => l.show)
