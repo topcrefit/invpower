@@ -106,11 +106,18 @@ export async function cardcomCreateTaxInvoice(
 
 /**
  * שליפת חשבוניות מ-Cardcom: GetReport (DocType=1 = חשבונית מס/קבלה).
+ * שולף עמוד יחיד.
+ *
+ * ⚠️ Cardcom מחזיר בפועל מקסימום ~200 רשומות לעמוד גם אם נבקש יותר,
+ *    אבל ה-skip עדיין מחושב לפי ItemsPerPage. כתוצאה מכך ערכי 500
+ *    יוצרים "חורים" בנתונים. לכן ההגדרה כאן היא ItemsPerPage=100.
  */
 export async function cardcomGetReport(
   fromDate: Date,
   toDate: Date,
-  docType: -1 | 1 | 305 = 1
+  docType: -1 | 1 | 305 = 1,
+  pageNumber: number = 1,
+  itemsPerPage: number = 100
 ) {
   const creds = await getCardcomCreds();
   if (!creds) throw new Error("Cardcom credentials not configured");
@@ -123,8 +130,8 @@ export async function cardcomGetReport(
     DocType: docType,
     CoinId: 1,
     OpenClose: 0,
-    ItemsPerPage: 500,
-    PageNumber: 1,
+    ItemsPerPage: itemsPerPage,
+    PageNumber: pageNumber,
   };
   if (creds.terminalNumber) body.TerminalNumber = creds.terminalNumber;
 
@@ -140,6 +147,28 @@ export async function cardcomGetReport(
   }
   const list = (json.Documents as unknown[] | undefined) ?? [];
   return list as Array<Record<string, unknown>>;
+}
+
+/**
+ * שליפת *כל* החשבוניות בטווח (כולל pagination אוטומטי).
+ * מתאים לדוחות הכנסות חודשיים/רבעוניים/שנתיים.
+ */
+export async function cardcomGetReportAll(
+  fromDate: Date,
+  toDate: Date,
+  docType: -1 | 1 | 305 = 1
+): Promise<Array<Record<string, unknown>>> {
+  const PER_PAGE = 100; // Cardcom מקבל ולא חורג בפועל
+  const all: Array<Record<string, unknown>> = [];
+  let page = 1;
+  // הגנה מפני לולאה אינסופית — עד 1000 עמודים = 100,000 רשומות
+  while (page <= 1000) {
+    const batch = await cardcomGetReport(fromDate, toDate, docType, page, PER_PAGE);
+    all.push(...batch);
+    if (batch.length < PER_PAGE) break;
+    page += 1;
+  }
+  return all;
 }
 
 /**
