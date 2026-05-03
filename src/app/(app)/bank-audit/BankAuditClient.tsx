@@ -466,8 +466,8 @@ export default function BankAuditClient() {
   }
 
   return (
-    <div className="space-y-4" dir="rtl">
-      <div className="card p-4 flex flex-wrap items-end gap-3">
+    <div className="space-y-2" dir="rtl">
+      <div className="card p-3 flex flex-wrap items-end gap-3">
         <div>
           <div className="text-xs text-muted-foreground mb-1">מתאריך</div>
           <input
@@ -546,14 +546,10 @@ export default function BankAuditClient() {
         <div className="flex-1" />
       </div>
 
-      <div className="card p-3">
-        <div className="text-sm font-semibold mb-1">
-          📋 ביקורת תנועות בנק
-        </div>
-        <div className="text-xs text-muted-foreground">
-          לכל תנועה בבנק — האם יש Fireberry "לא נשלח" שמוכן להפקה? • לחץ על
-          כותרת עמודה למיון
-        </div>
+      <div className="px-1 text-xs text-muted-foreground flex items-center gap-2">
+        <span className="font-semibold text-slate-700">📋 ביקורת תנועות בנק</span>
+        <span>—</span>
+        <span>לכל תנועה — האם יש Fireberry "לא נשלח" להפקה? לחץ על כותרת למיון</span>
       </div>
 
       {info && (
@@ -969,13 +965,13 @@ function FilterCard({
     <button
       type="button"
       onClick={onClick}
-      className={`card p-2 text-right transition cursor-pointer hover:brightness-95 ${
+      className={`card px-2 py-1.5 text-right transition cursor-pointer hover:brightness-95 leading-tight ${
         tone ? tones[tone] : ""
       } ${active ? "ring-2 ring-blue-500" : ""}`}
     >
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-base font-bold">{value}</div>
-      {sub && <div className="text-xs text-muted-foreground">{sub}</div>}
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-sm font-bold">{value}</div>
+      {sub && <div className="text-[11px] text-muted-foreground">{sub}</div>}
     </button>
   );
 }
