@@ -655,6 +655,32 @@ export default function BankAuditClient() {
         <div className="overflow-auto max-h-[calc(100vh-360px)]">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-slate-100 z-10">
+              {/* Group headers — Bank Leumi vs Fireberry */}
+              <tr className="text-center text-xs font-bold uppercase tracking-wide bg-slate-200">
+                {tab === "ready" && <th className="px-2 py-1.5"></th>}
+                <th
+                  className="px-2 py-1.5 text-blue-900 border-l-2 border-slate-400"
+                  colSpan={5}
+                >
+                  בנק לאומי
+                </th>
+                {tab === "ready" && (
+                  <th className="px-2 py-1.5 text-emerald-900" colSpan={3}>
+                    FIREBERRY
+                  </th>
+                )}
+                {tab === "issued" && (
+                  <th className="px-2 py-1.5 text-emerald-900" colSpan={2}>
+                    חשבונית
+                  </th>
+                )}
+                {tab === "no_match" && (
+                  <th className="px-2 py-1.5 text-amber-900">פעולה</th>
+                )}
+                {tab === "admin" && (
+                  <th className="px-2 py-1.5 text-slate-700">סיבה</th>
+                )}
+              </tr>
               <tr className="text-right">
                 {tab === "ready" && <th className="px-2 py-2 w-8"></th>}
                 <Th
@@ -685,6 +711,7 @@ export default function BankAuditClient() {
                   sortKey={sortKey}
                   sortDir={sortDir}
                   onClick={toggleSort}
+                  extraClass="border-l-2 border-slate-300"
                 />
                 {tab === "ready" && (
                   <>
@@ -766,7 +793,7 @@ export default function BankAuditClient() {
                     <td className="px-2 py-1.5 text-xs text-muted-foreground whitespace-nowrap">
                       {r.extractedAccount ?? "—"}
                     </td>
-                    <td className="px-2 py-1.5 whitespace-nowrap font-medium">
+                    <td className="px-2 py-1.5 whitespace-nowrap font-medium border-l-2 border-slate-200">
                       {formatILS(r.amount)}
                     </td>
                     {tab === "ready" && (
@@ -886,17 +913,19 @@ function Th({
   sortKey,
   sortDir,
   onClick,
+  extraClass,
 }: {
   label: string;
   k: SortKey;
   sortKey: SortKey;
   sortDir: SortDir;
   onClick: (k: SortKey) => void;
+  extraClass?: string;
 }) {
   const active = sortKey === k;
   return (
     <th
-      className="px-2 py-2 cursor-pointer hover:bg-slate-200 select-none whitespace-nowrap"
+      className={`px-2 py-2 cursor-pointer hover:bg-slate-200 select-none whitespace-nowrap ${extraClass ?? ""}`}
       onClick={() => onClick(k)}
     >
       <span className="inline-flex items-center gap-1">
