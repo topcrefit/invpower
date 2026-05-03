@@ -141,8 +141,8 @@ export default function SearchClient() {
         <h1 className="text-2xl font-bold">חיפוש לקוח</h1>
       </div>
       <p className="text-sm text-muted-foreground mb-4">
-        חיפוש חוצה-מערכות: שם, ת.ז., או טלפון. החיפוש מאתר את הלקוח בבנק,
-        ב-Fireberry, ב-Cardcom וברשימת החשבוניות שהמערכת הפיקה.
+        חיפוש חוצה-מערכות: שם, ת.ז., טלפון, אסמכתא או מספר חשבונית. החיפוש
+        מאתר את הלקוח בבנק, ב-Fireberry, ב-Cardcom וברשימת החשבוניות שהמערכת הפיקה.
       </p>
 
       <form onSubmit={search} className="flex gap-2 mb-6">
@@ -152,7 +152,7 @@ export default function SearchClient() {
             type="text"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="שם / ת.ז. / טלפון / אסמכתא"
+            placeholder="שם / ת.ז. / טלפון / אסמכתא / מספר חשבונית"
             maxLength={30}
             className="w-[30ch] border rounded-md pr-10 pl-3 py-2.5 text-sm"
             autoFocus
