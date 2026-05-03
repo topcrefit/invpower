@@ -32,7 +32,9 @@ export async function GET(req: Request) {
   }
 
   try {
-    const documents = await cardcomGetReportAll(from, to, 1);
+    // -1 = כל סוגי המסמכים (חשבונית מס קבלה, קבלה, קבלת זיכוי, חשבונית מס וכו')
+    // כדי לקבל דוח הכנסות מלא זהה לדוח הסטנדרטי של Cardcom.
+    const documents = await cardcomGetReportAll(from, to, -1);
     const buf = buildIncomeReportXlsx(documents);
     const filename = `income_${fromStr}_${toStr}.xlsx`;
     return new Response(new Uint8Array(buf), {

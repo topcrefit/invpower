@@ -47,14 +47,7 @@ export function buildIncomeReportXlsx(
         ).padStart(2, "0")}`
       : "";
     const invType = Number(d.InvoiceType ?? 1);
-    const docTypeName =
-      invType === 1
-        ? "חשבונית מס קבלה"
-        : invType === 305
-          ? "חשבונית מס"
-          : invType === 3
-            ? "חשבונית מס קבלה"
-            : `סוג ${invType}`;
+    const docTypeName = invoiceTypeName(invType);
     return {
       date: dateStr,
       time: timeStr,
@@ -203,6 +196,25 @@ export function buildIncomeReportXlsx(
   // החזרת Buffer לקריאה כקובץ
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   return buf as Buffer;
+}
+
+/**
+ * מיפוי InvoiceType (מספרי) לשם בעברית — לפי טבלת Cardcom v11.
+ */
+function invoiceTypeName(t: number): string {
+  switch (t) {
+    case 1: return "חשבונית מס קבלה";
+    case 2: return "קבלה";
+    case 3: return "חשבונית מס";
+    case 4: return "קבלה זיכוי";
+    case 5: return "הזמנת לקוח";
+    case 100: return "קבלה";
+    case 305: return "חשבונית עסקה";
+    case 320: return "הצעת מחיר";
+    case 330: return "חשבונית מס קבלה זיכוי";
+    case 400: return "תעודת משלוח";
+    default: return `סוג ${t}`;
+  }
 }
 
 function num(v: unknown): number {
